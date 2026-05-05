@@ -376,25 +376,21 @@ export async function save() {
   return { success: true, action: dialogHandled ? 'saved_with_dialog' : 'Ctrl+S_dispatched' };
 }
 
-// Detect a save-as / save dialog with a name input (used by saveAs)
-const DETECT_NAME_DIALOG_JS = `
-  (function() {
-    var dialogs = document.querySelectorAll('[role="dialog"], [class*="dialog"], [class*="modal"], [class*="popup"]');
-    for (var i = 0; i < dialogs.length; i++) {
-      var d = dialogs[i];
-      if (!d.offsetHeight || !d.offsetWidth) continue;
-      var input = d.querySelector('input[type="text"], input:not([type])');
-      if (input) {
-        return { found: true, currentValue: input.value || '' };
-      }
-    }
-    return { found: false };
-  })()
-`;
-
 /**
  * Save the current Pine Script as a NEW script under a given name.
- * Tries Ctrl+Shift+S first, falls back to clicking the editor's script-title menu and finding "Save as...".
+ *
+ * Path (validated against the live TradingView Pine Editor):
+ *   1. Click `.nameButton-k49p41Es` (the script-name button in the Pine Editor toolbar) — opens menu
+ *   2. Click the "Make a copy…" menu row (TradingView's Save As)
+ *   3. Wait for the "Copy script" dialog
+ *   4. Set the input value (React-controlled — use the native value setter + dispatch input/change)
+ *   5. Click the dialog's primary submit button ("Save"/"Make copy") with a full pointer event sequence
+ *
+ * Notes:
+ *   - Ctrl+Shift+S is NOT bound to Save-As in TV's Pine Editor; don't rely on it.
+ *   - There is also a "Make a copy…" item in the *chart layout* menu (next to the chart's Save indicator).
+ *     We must use the Pine Editor's nameButton specifically, not the chart-layout menu, otherwise we open
+ *     the chart-layout copy dialog instead.
  */
 export async function saveAs({ name } = {}) {
   if (!name || typeof name !== 'string' || !name.trim()) {
@@ -405,132 +401,141 @@ export async function saveAs({ name } = {}) {
   const editorReady = await ensurePineEditorOpen();
   if (!editorReady) throw new Error('Could not open Pine Editor.');
 
-  const c = await getClient();
-
-  // Step 1: try Ctrl+Shift+S (modifiers: 2 Ctrl | 8 Shift = 10)
-  await c.Input.dispatchKeyEvent({ type: 'keyDown', modifiers: 10, key: 'S', code: 'KeyS', windowsVirtualKeyCode: 83 });
-  await c.Input.dispatchKeyEvent({ type: 'keyUp', modifiers: 10, key: 'S', code: 'KeyS' });
-  await new Promise(r => setTimeout(r, 1200));
-
-  let dialogState = await evaluate(DETECT_NAME_DIALOG_JS);
-
-  // Step 2: if shortcut didn't open a dialog, try DOM path — open the editor's script-title menu and click "Save as…"
-  let menuPath = null;
-  if (!dialogState?.found) {
-    menuPath = await evaluate(`
-      (function() {
-        // Heuristics for the script-title trigger in the Pine Editor header
-        var selectors = [
-          '[data-name="script-title"]',
-          '[class*="scriptTitle"]',
-          '[class*="script-title"]',
-          'button[class*="more"]',
-        ];
-        var el = null;
-        for (var s = 0; s < selectors.length; s++) {
-          var found = document.querySelectorAll(selectors[s]);
-          for (var k = 0; k < found.length; k++) {
-            if (found[k].offsetHeight > 0) { el = found[k]; break; }
-          }
-          if (el) break;
-        }
-        if (!el) return { clicked: false, reason: 'title-trigger-not-found' };
-        el.click();
-        return { clicked: true, sel: selectors.find(function(s){ return el.matches(s); }) };
-      })()
-    `);
-
-    if (menuPath?.clicked) {
-      await new Promise(r => setTimeout(r, 600));
-      const saveAsItem = await evaluate(`
-        (function() {
-          var items = document.querySelectorAll('[role="menuitem"], li, button, div, span');
-          for (var i = 0; i < items.length; i++) {
-            var t = (items[i].textContent || '').trim();
-            if (t.length === 0 || t.length > 40) continue;
-            if (/^save\\s+as\\b/i.test(t) || /^save\\s+script\\s+as\\b/i.test(t)) {
-              if (items[i].offsetParent !== null) {
-                items[i].click();
-                return { clicked: true, label: t };
-              }
-            }
-          }
-          return { clicked: false };
-        })()
-      `);
-      if (saveAsItem?.clicked) {
-        await new Promise(r => setTimeout(r, 1000));
-        dialogState = await evaluate(DETECT_NAME_DIALOG_JS);
-      }
-    }
-  }
-
-  if (!dialogState?.found) {
-    return {
-      success: false,
-      error: 'Save As dialog did not open. Try opening the Pine Editor manually and pressing Ctrl+Shift+S.',
-      menu_path_tried: menuPath || null,
-    };
-  }
-
-  // Step 3: focus + select the name input
-  await evaluate(`
+  // Step 1: click the Pine Editor's script-name button (NOT the chart layout's title)
+  const menuOpened = await evaluate(`
     (function() {
-      var dialogs = document.querySelectorAll('[role="dialog"], [class*="dialog"], [class*="modal"], [class*="popup"]');
-      for (var i = 0; i < dialogs.length; i++) {
-        var d = dialogs[i];
-        if (!d.offsetHeight) continue;
-        var input = d.querySelector('input[type="text"], input:not([type])');
-        if (input) { input.focus(); input.select(); return true; }
-      }
-      return false;
+      var btn = document.querySelector('.nameButton-k49p41Es');
+      if (!btn || btn.offsetHeight === 0) return { clicked: false, reason: 'nameButton-k49p41Es not visible' };
+      btn.click();
+      return { clicked: true, label: (btn.textContent || '').trim().slice(0, 60) };
     })()
   `);
-  await new Promise(r => setTimeout(r, 150));
+  if (!menuOpened?.clicked) {
+    return { success: false, error: 'Pine Editor name button not found. Make sure the Pine Editor is open.', detail: menuOpened };
+  }
+  await new Promise(r => setTimeout(r, 600));
 
-  // Clear via Ctrl+A + Delete (works on the focused input)
-  await c.Input.dispatchKeyEvent({ type: 'keyDown', modifiers: 2, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65 });
-  await c.Input.dispatchKeyEvent({ type: 'keyUp', modifiers: 2, key: 'a', code: 'KeyA' });
-  await c.Input.dispatchKeyEvent({ type: 'keyDown', key: 'Delete', code: 'Delete', windowsVirtualKeyCode: 46 });
-  await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 'Delete', code: 'Delete' });
-  await new Promise(r => setTimeout(r, 100));
-
-  // Step 4: type the new name
-  await c.Input.insertText({ text: cleanName });
-  await new Promise(r => setTimeout(r, 300));
-
-  // Step 5: click the dialog's Save button (or press Enter as fallback)
-  const saved = await evaluate(`
+  // Step 2: click "Make a copy…" — walk up to the row element with role="row"
+  const makeCopyClicked = await evaluate(`
     (function() {
-      var dialogs = document.querySelectorAll('[role="dialog"], [class*="dialog"], [class*="modal"], [class*="popup"]');
+      var titles = document.querySelectorAll('div.title-RDCgMoEQ');
+      for (var i = 0; i < titles.length; i++) {
+        var el = titles[i];
+        if (el.offsetParent === null) continue;
+        if (!/^Make a copy/i.test((el.textContent || '').trim())) continue;
+        var p = el;
+        while (p && !(p.tagName === 'DIV' && p.getAttribute('role') === 'row')) p = p.parentElement;
+        var target = p || el;
+        var r = target.getBoundingClientRect();
+        var x = r.left + r.width / 2, y = r.top + r.height / 2;
+        var opts = { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0 };
+        target.dispatchEvent(new PointerEvent('pointerdown', opts));
+        target.dispatchEvent(new MouseEvent('mousedown', opts));
+        target.dispatchEvent(new PointerEvent('pointerup', opts));
+        target.dispatchEvent(new MouseEvent('mouseup', opts));
+        target.dispatchEvent(new MouseEvent('click', opts));
+        return { clicked: true };
+      }
+      return { clicked: false };
+    })()
+  `);
+  if (!makeCopyClicked?.clicked) {
+    return { success: false, error: '"Make a copy…" menu item not found in the script-name menu.' };
+  }
+  await new Promise(r => setTimeout(r, 1200));
+
+  // Step 3: locate the "Copy script" dialog (must check title — chart-layout copy dialog has same shape)
+  const dialogReady = await evaluate(`
+    (function() {
+      var dialogs = document.querySelectorAll('[class*="dialog"]');
       for (var i = 0; i < dialogs.length; i++) {
         var d = dialogs[i];
-        if (!d.offsetHeight) continue;
+        if (!d.offsetHeight || d.offsetWidth > 1100) continue;
+        var titleEl = d.querySelector('[class*="title"]');
+        var t = titleEl ? (titleEl.textContent || '').trim() : '';
+        if (!/Copy script/i.test(t)) continue;
+        var input = d.querySelector('input[type="text"], input:not([type])');
+        if (!input) continue;
+        return { found: true, defaultValue: input.value || '', dialogTitle: t };
+      }
+      return { found: false };
+    })()
+  `);
+  if (!dialogReady?.found) {
+    return { success: false, error: 'Copy script dialog did not open after clicking "Make a copy…".' };
+  }
+
+  // Step 4: set the input value via React-native setter + fire input/change so the submit button enables
+  const named = await evaluate(`
+    (function() {
+      var name = ${JSON.stringify(cleanName)};
+      var dialogs = document.querySelectorAll('[class*="dialog"]');
+      for (var i = 0; i < dialogs.length; i++) {
+        var d = dialogs[i];
+        if (!d.offsetHeight || d.offsetWidth > 1100) continue;
+        var titleEl = d.querySelector('[class*="title"]');
+        var t = titleEl ? (titleEl.textContent || '').trim() : '';
+        if (!/Copy script/i.test(t)) continue;
+        var input = d.querySelector('input[type="text"], input:not([type])');
+        if (!input) continue;
+        input.focus();
+        var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        setter.call(input, '');
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        setter.call(input, name);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        return { ok: true, valueAfter: input.value };
+      }
+      return { ok: false };
+    })()
+  `);
+  if (!named?.ok) {
+    return { success: false, error: 'Could not set the new-name input value.' };
+  }
+  await new Promise(r => setTimeout(r, 200));
+
+  // Step 5: click the dialog's submit button (label is "Save" in TV's Copy script dialog)
+  const submitted = await evaluate(`
+    (function() {
+      var dialogs = document.querySelectorAll('[class*="dialog"]');
+      for (var i = 0; i < dialogs.length; i++) {
+        var d = dialogs[i];
+        if (!d.offsetHeight || d.offsetWidth > 1100) continue;
+        var titleEl = d.querySelector('[class*="title"]');
+        var t = titleEl ? (titleEl.textContent || '').trim() : '';
+        if (!/Copy script/i.test(t)) continue;
         var btns = d.querySelectorAll('button');
         for (var j = 0; j < btns.length; j++) {
           var label = (btns[j].textContent || '').trim();
-          if ((label === 'Save' || label === 'Save script' || /^save\\b/i.test(label)) &&
-              btns[j].offsetParent !== null && !btns[j].disabled) {
-            btns[j].click();
-            return { clicked: true, label: label };
-          }
+          var primary = label === 'Save' || label === 'Make copy' || label === 'Copy' || /^Copy\\b/i.test(label);
+          if (!primary) continue;
+          if (btns[j].disabled) continue;
+          var rect = btns[j].getBoundingClientRect();
+          var x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
+          var opts = { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0 };
+          btns[j].dispatchEvent(new PointerEvent('pointerdown', opts));
+          btns[j].dispatchEvent(new MouseEvent('mousedown', opts));
+          btns[j].dispatchEvent(new PointerEvent('pointerup', opts));
+          btns[j].dispatchEvent(new MouseEvent('mouseup', opts));
+          btns[j].dispatchEvent(new MouseEvent('click', opts));
+          return { clicked: true, label: label };
         }
       }
       return { clicked: false };
     })()
   `);
-
-  if (!saved?.clicked) {
-    await c.Input.dispatchKeyEvent({ type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
-    await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 'Enter', code: 'Enter' });
+  if (!submitted?.clicked) {
+    return { success: false, error: 'Could not click the Copy script dialog submit button.' };
   }
   await new Promise(r => setTimeout(r, 1500));
 
   return {
     success: true,
-    action: saved?.clicked ? 'save_as_completed' : 'save_as_via_enter',
+    action: 'save_as_completed',
     name: cleanName,
-    button_label: saved?.label || null,
+    button_label: submitted.label,
+    note: 'After Save As, the editor is now linked to the NEW script slot. The original slot is unchanged.',
   };
 }
 
