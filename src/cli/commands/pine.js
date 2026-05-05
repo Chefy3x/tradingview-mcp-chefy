@@ -73,8 +73,15 @@ register('pine', {
       },
     }],
     ['save', {
-      description: 'Save the current Pine Script (Ctrl+S)',
+      description: 'Save the current Pine Script (Ctrl+S — overwrites existing slot)',
       handler: () => core.save(),
+    }],
+    ['save-as', {
+      description: 'Save the current Pine Script as a NEW script (does not overwrite). -n <name> required.',
+      options: {
+        name: { type: 'string', short: 'n', description: 'Name for the new script' },
+      },
+      handler: (opts) => core.saveAs({ name: opts.name }),
     }],
     ['new', {
       description: 'Create a new blank Pine Script (indicator, strategy, library)',

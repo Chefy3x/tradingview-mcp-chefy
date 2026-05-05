@@ -25,8 +25,15 @@ export function registerPineTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('pine_save', 'Save the current Pine Script (Ctrl+S)', {}, async () => {
+  server.tool('pine_save', 'Save the current Pine Script (Ctrl+S). OVERWRITES the existing script slot — use pine_save_as if you want a new script.', {}, async () => {
     try { return jsonResult(await core.save()); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  server.tool('pine_save_as', 'Save the current Pine Script as a NEW script with a custom name (does NOT overwrite the existing slot). Equivalent to Ctrl+Shift+S in the Pine Editor. Use this when injecting source code that should live alongside your existing scripts.', {
+    name: z.string().min(1).describe('Name for the new saved Pine script (will appear in your TradingView script library)'),
+  }, async ({ name }) => {
+    try { return jsonResult(await core.saveAs({ name })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 

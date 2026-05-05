@@ -376,6 +376,164 @@ export async function save() {
   return { success: true, action: dialogHandled ? 'saved_with_dialog' : 'Ctrl+S_dispatched' };
 }
 
+// Detect a save-as / save dialog with a name input (used by saveAs)
+const DETECT_NAME_DIALOG_JS = `
+  (function() {
+    var dialogs = document.querySelectorAll('[role="dialog"], [class*="dialog"], [class*="modal"], [class*="popup"]');
+    for (var i = 0; i < dialogs.length; i++) {
+      var d = dialogs[i];
+      if (!d.offsetHeight || !d.offsetWidth) continue;
+      var input = d.querySelector('input[type="text"], input:not([type])');
+      if (input) {
+        return { found: true, currentValue: input.value || '' };
+      }
+    }
+    return { found: false };
+  })()
+`;
+
+/**
+ * Save the current Pine Script as a NEW script under a given name.
+ * Tries Ctrl+Shift+S first, falls back to clicking the editor's script-title menu and finding "Save as...".
+ */
+export async function saveAs({ name } = {}) {
+  if (!name || typeof name !== 'string' || !name.trim()) {
+    throw new Error('saveAs requires a non-empty name');
+  }
+  const cleanName = name.trim();
+
+  const editorReady = await ensurePineEditorOpen();
+  if (!editorReady) throw new Error('Could not open Pine Editor.');
+
+  const c = await getClient();
+
+  // Step 1: try Ctrl+Shift+S (modifiers: 2 Ctrl | 8 Shift = 10)
+  await c.Input.dispatchKeyEvent({ type: 'keyDown', modifiers: 10, key: 'S', code: 'KeyS', windowsVirtualKeyCode: 83 });
+  await c.Input.dispatchKeyEvent({ type: 'keyUp', modifiers: 10, key: 'S', code: 'KeyS' });
+  await new Promise(r => setTimeout(r, 1200));
+
+  let dialogState = await evaluate(DETECT_NAME_DIALOG_JS);
+
+  // Step 2: if shortcut didn't open a dialog, try DOM path — open the editor's script-title menu and click "Save as…"
+  let menuPath = null;
+  if (!dialogState?.found) {
+    menuPath = await evaluate(`
+      (function() {
+        // Heuristics for the script-title trigger in the Pine Editor header
+        var selectors = [
+          '[data-name="script-title"]',
+          '[class*="scriptTitle"]',
+          '[class*="script-title"]',
+          'button[class*="more"]',
+        ];
+        var el = null;
+        for (var s = 0; s < selectors.length; s++) {
+          var found = document.querySelectorAll(selectors[s]);
+          for (var k = 0; k < found.length; k++) {
+            if (found[k].offsetHeight > 0) { el = found[k]; break; }
+          }
+          if (el) break;
+        }
+        if (!el) return { clicked: false, reason: 'title-trigger-not-found' };
+        el.click();
+        return { clicked: true, sel: selectors.find(function(s){ return el.matches(s); }) };
+      })()
+    `);
+
+    if (menuPath?.clicked) {
+      await new Promise(r => setTimeout(r, 600));
+      const saveAsItem = await evaluate(`
+        (function() {
+          var items = document.querySelectorAll('[role="menuitem"], li, button, div, span');
+          for (var i = 0; i < items.length; i++) {
+            var t = (items[i].textContent || '').trim();
+            if (t.length === 0 || t.length > 40) continue;
+            if (/^save\\s+as\\b/i.test(t) || /^save\\s+script\\s+as\\b/i.test(t)) {
+              if (items[i].offsetParent !== null) {
+                items[i].click();
+                return { clicked: true, label: t };
+              }
+            }
+          }
+          return { clicked: false };
+        })()
+      `);
+      if (saveAsItem?.clicked) {
+        await new Promise(r => setTimeout(r, 1000));
+        dialogState = await evaluate(DETECT_NAME_DIALOG_JS);
+      }
+    }
+  }
+
+  if (!dialogState?.found) {
+    return {
+      success: false,
+      error: 'Save As dialog did not open. Try opening the Pine Editor manually and pressing Ctrl+Shift+S.',
+      menu_path_tried: menuPath || null,
+    };
+  }
+
+  // Step 3: focus + select the name input
+  await evaluate(`
+    (function() {
+      var dialogs = document.querySelectorAll('[role="dialog"], [class*="dialog"], [class*="modal"], [class*="popup"]');
+      for (var i = 0; i < dialogs.length; i++) {
+        var d = dialogs[i];
+        if (!d.offsetHeight) continue;
+        var input = d.querySelector('input[type="text"], input:not([type])');
+        if (input) { input.focus(); input.select(); return true; }
+      }
+      return false;
+    })()
+  `);
+  await new Promise(r => setTimeout(r, 150));
+
+  // Clear via Ctrl+A + Delete (works on the focused input)
+  await c.Input.dispatchKeyEvent({ type: 'keyDown', modifiers: 2, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65 });
+  await c.Input.dispatchKeyEvent({ type: 'keyUp', modifiers: 2, key: 'a', code: 'KeyA' });
+  await c.Input.dispatchKeyEvent({ type: 'keyDown', key: 'Delete', code: 'Delete', windowsVirtualKeyCode: 46 });
+  await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 'Delete', code: 'Delete' });
+  await new Promise(r => setTimeout(r, 100));
+
+  // Step 4: type the new name
+  await c.Input.insertText({ text: cleanName });
+  await new Promise(r => setTimeout(r, 300));
+
+  // Step 5: click the dialog's Save button (or press Enter as fallback)
+  const saved = await evaluate(`
+    (function() {
+      var dialogs = document.querySelectorAll('[role="dialog"], [class*="dialog"], [class*="modal"], [class*="popup"]');
+      for (var i = 0; i < dialogs.length; i++) {
+        var d = dialogs[i];
+        if (!d.offsetHeight) continue;
+        var btns = d.querySelectorAll('button');
+        for (var j = 0; j < btns.length; j++) {
+          var label = (btns[j].textContent || '').trim();
+          if ((label === 'Save' || label === 'Save script' || /^save\\b/i.test(label)) &&
+              btns[j].offsetParent !== null && !btns[j].disabled) {
+            btns[j].click();
+            return { clicked: true, label: label };
+          }
+        }
+      }
+      return { clicked: false };
+    })()
+  `);
+
+  if (!saved?.clicked) {
+    await c.Input.dispatchKeyEvent({ type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+    await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 'Enter', code: 'Enter' });
+  }
+  await new Promise(r => setTimeout(r, 1500));
+
+  return {
+    success: true,
+    action: saved?.clicked ? 'save_as_completed' : 'save_as_via_enter',
+    name: cleanName,
+    button_label: saved?.label || null,
+  };
+}
+
 export async function getConsole({ errors_only } = {}) {
   const editorReady = await ensurePineEditorOpen();
   if (!editorReady) throw new Error('Could not open Pine Editor.');
