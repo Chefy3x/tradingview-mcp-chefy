@@ -28,31 +28,43 @@ If those repos help you, go star them.
 
 ## What's Different in This Fork
 
-| Area | Upstream behavior | This fork |
-|------|------------------|-----------|
-| `data_get_strategy_results` | Returns full strategy tester payload | Returns `{netProfit, profitFactor, winRate, maxDD, sharpe, n, avgWin, avgLoss}` by default. `verbose: true` for raw |
-| `data_get_trades` | `max_trades` cap only | Cursor-paginated. Default `limit: 20`. `all: true` for full list |
-| `data_get_equity` | Full curve point-by-point | Downsampled to N buckets (default 50). `verbose: true` for raw |
-| `pine_get_console` | All console output | New `pine_console_errors` filters server-side |
-| New: `backtest_summary` | — | Single call, all key metrics, ~200 bytes |
-| New: `backtest_compare` | — | A/B two strategy runs server-side, returns only the diff |
+| Area | Upstream behavior | This fork | Status |
+|------|------------------|-----------|--------|
+| `data_get_strategy_results` | Returns full strategy tester payload (~67K tokens) | In-browser aggregation: returns ~40 curated metrics + computed `expectancy` + first/last trade timestamps. `verbose: true` for the full raw payload | **shipped (v0.1)** |
+| `data_get_trades` | `max_trades` cap only | Cursor-paginated. Default `limit: 20`. `all: true` for full list | planned |
+| `data_get_equity` | Full curve point-by-point | Downsampled to N buckets (default 50). `verbose: true` for raw | planned |
+| `pine_get_console` | All console output | New `pine_console_errors` filters server-side | planned |
+| Strategy detector | Stops at first `is_price_study === false` source — latches onto Volume / EMA | Score-based: scans all sources and picks the one with strongest strategy signals (`ordersData`, `_strategyOrdersPaneView`, `_reportData`, `is_strategy` meta) | **shipped (v0.1)** |
 
-**Net effect:** a typical backtest read goes from ~50KB to ~200 bytes. On a heavy iteration session (20+ runs), this is the difference between burning $20 of tokens and burning $1.
+### Measured token cost — `data_get_strategy_results`
+
+Real numbers from a 121-week (255-trade) backtest of a Pine strategy on COMEX:GC1! 1H:
+
+| Mode | Output size | Approx tokens |
+|------|-------------|---------------|
+| Default (summary) | ~1.7 KB | ~425 |
+| `verbose: true` | 268,792 chars | ~67,000 |
+
+**~99% reduction per call** in default mode. On a heavy iteration session (20+ runs), this is the difference between burning ~$20 of tokens on result reads alone vs ~$0.10.
+
+The aggregation runs **inside TradingView's Electron runtime** — same CDP round-trip, ~150× less data crossing the wire.
 
 ---
 
 ## Status
 
-**Pre-release.** The fork is set up. The new aggregation tools are being written now. Until v0.2 ships, this repo behaves identically to LewisWJackson/tradingview-mcp-jackson — use that one if you need stability today.
+**v0.1** — first aggregation tool (`data_get_strategy_results`) shipped, with hardened strategy detector and trade-aggregate computation in-browser. Other tools still match upstream behavior.
 
 Roadmap:
 
 - [x] Fork repo, set up structure
-- [ ] `backtest_summary` with in-browser aggregation
-- [ ] `backtest_trades_paged` cursor pagination
-- [ ] `backtest_equity_summary` downsampling
+- [x] `data_get_strategy_results` summary mode + `verbose` escape hatch
+- [x] Strategy detector hardening (score-based, no `is_price_study` gate)
+- [x] In-browser trade-derived aggregates (win rate, PF, max DD, expectancy)
+- [ ] `data_get_equity` downsampling
+- [ ] `data_get_trades` cursor pagination
 - [ ] `pine_console_errors` filtered tool
-- [ ] Token-cost benchmark vs upstream
+- [ ] Token-cost benchmark video
 - [ ] PR uncontroversial fixes back to LewisWJackson upstream
 - [ ] v0.2 release
 
