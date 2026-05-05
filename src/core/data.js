@@ -156,12 +156,26 @@ export async function getStrategyResults({ verbose } = {}) {
       try {
         var chart = ${CHART_API}._chartWidget;
         var sources = chart.model().model().dataSources();
-        var strat = null;
+        // Score-based strategy detection: prefer sources with ordersData / is_strategy meta,
+        // fall back to anything with reportData. Avoids latching onto Volume and other
+        // non-strategy studies that happen to expose a 'performance' property.
+        var strat = null, bestScore = 0;
         for (var i = 0; i < sources.length; i++) {
           var s = sources[i];
-          if (s.metaInfo && s.metaInfo().is_price_study === false && (s.reportData || s.performance)) { strat = s; break; }
+          if (!s.metaInfo) continue;
+          var meta;
+          try { meta = s.metaInfo(); } catch(e) { continue; }
+          if (!meta || meta.is_price_study === true) continue;
+          var score = 0;
+          if (meta.is_strategy === true) score += 100;
+          if (s.ordersData) score += 50;
+          if (s.tradesData) score += 20;
+          if (s.equityData) score += 10;
+          if (s.reportData) score += 5;
+          if (s.performance) score += 1;
+          if (score > bestScore) { bestScore = score; strat = s; }
         }
-        if (!strat) return {error: 'No strategy found on chart. Add a strategy indicator first.'};
+        if (!strat || bestScore < 5) return {error: 'No strategy found on chart. Add a strategy indicator first.'};
 
         var stratName = '';
         try { var meta = strat.metaInfo(); stratName = meta.description || meta.shortDescription || ''; } catch(e) {}
