@@ -409,45 +409,142 @@ export async function getTrades({ max_trades } = {}) {
   return { success: true, trade_count: trades?.trades?.length || 0, source: trades?.source, trades: trades?.trades || [], error: trades?.error };
 }
 
-export async function getEquity() {
-  const equity = await evaluate(`
+export async function getEquity({ points, verbose } = {}) {
+  const targetPoints = Math.max(2, Math.min(points || 50, 500));
+
+  const result = await evaluate(`
     (function() {
       try {
         var chart = ${CHART_API}._chartWidget;
         var sources = chart.model().model().dataSources();
-        var strat = null;
+        // Same score-based detector as getStrategyResults
+        var strat = null, bestScore = 0;
         for (var i = 0; i < sources.length; i++) {
           var s = sources[i];
-          if (s.metaInfo && s.metaInfo().is_price_study === false && (s.reportData || s.performance)) { strat = s; break; }
+          if (!s.metaInfo) continue;
+          var meta;
+          try { meta = s.metaInfo(); } catch(e) { continue; }
+          if (!meta) continue;
+          var score = 0;
+          if (meta.is_strategy === true) score += 100;
+          if (s.ordersData) score += 50;
+          if (s._strategyOrdersPaneView) score += 50;
+          if (s._reportData) score += 30;
+          if (s.tradesData) score += 20;
+          if (s.equityData) score += 10;
+          if (s.reportData) score += 5;
+          if (score > bestScore) { bestScore = score; strat = s; }
         }
-        if (!strat) return {data: [], source: 'internal_api', error: 'No strategy found on chart.'};
-        var data = [];
+        if (!strat || bestScore < 30) return {error: 'No strategy found on chart. Add a strategy indicator first.'};
+
+        // Build per-trade equity points from cumulative profit
+        var trades = null;
+        if (strat.reportData) {
+          var rd = typeof strat.reportData === 'function' ? strat.reportData() : strat.reportData;
+          if (rd && typeof rd.value === 'function') rd = rd.value();
+          if (rd && Array.isArray(rd.trades)) trades = rd.trades;
+        }
+        if (!Array.isArray(trades) && strat.tradesData) {
+          trades = typeof strat.tradesData === 'function' ? strat.tradesData() : strat.tradesData;
+          if (trades && typeof trades.value === 'function') trades = trades.value();
+        }
+
+        var pts = [];
+        if (Array.isArray(trades) && trades.length > 0) {
+          var equity = 0;
+          for (var t = 0; t < trades.length; t++) {
+            var tr = trades[t];
+            if (!tr || typeof tr !== 'object') continue;
+            var pnl = null;
+            if (tr.tp && typeof tr.tp === 'object' && typeof tr.tp.v === 'number') pnl = tr.tp.v;
+            else if (typeof tr.profit === 'number') pnl = tr.profit;
+            if (typeof pnl !== 'number' || isNaN(pnl)) continue;
+            equity += pnl;
+            var time = (tr.x && tr.x.tm) || (tr.e && tr.e.tm) || null;
+            var dd = (tr.dd && typeof tr.dd === 'object' && typeof tr.dd.v === 'number') ? tr.dd.v : null;
+            pts.push({ time: time, equity: equity, dd: dd });
+          }
+          return { points: pts, source_path: 'computed_from_trades', source: 'internal_api' };
+        }
+
+        // Fallback: native strat.equityData (rare on user strategies)
         if (strat.equityData) {
           var eq = typeof strat.equityData === 'function' ? strat.equityData() : strat.equityData;
           if (eq && typeof eq.value === 'function') eq = eq.value();
-          if (Array.isArray(eq)) data = eq;
-        }
-        if (data.length === 0 && strat.bars) {
-          var bars = typeof strat.bars === 'function' ? strat.bars() : strat.bars;
-          if (bars && typeof bars.lastIndex === 'function') {
-            var end = bars.lastIndex(); var start = bars.firstIndex();
-            for (var i = start; i <= end; i++) { var v = bars.valueAt(i); if (v) data.push({time: v[0], equity: v[1], drawdown: v[2] || null}); }
+          if (Array.isArray(eq)) {
+            return { points: eq, source_path: 'native_equityData', source: 'internal_api' };
           }
         }
-        if (data.length === 0) {
-          var perfData = {};
-          if (strat.performance) {
-            var perf = strat.performance();
-            if (perf && typeof perf.value === 'function') perf = perf.value();
-            if (perf && typeof perf === 'object') { var pkeys = Object.keys(perf); for (var p = 0; p < pkeys.length; p++) { if (/equity|drawdown|profit|net/i.test(pkeys[p])) perfData[pkeys[p]] = perf[pkeys[p]]; } }
-          }
-          if (Object.keys(perfData).length > 0) return {data: [], equity_summary: perfData, source: 'internal_api', note: 'Full equity curve not available via API; equity summary metrics returned instead.'};
-        }
-        return {data: data, source: 'internal_api'};
-      } catch(e) { return {data: [], source: 'internal_api', error: e.message}; }
+
+        return { points: [], source: 'internal_api', note: 'No trades or equityData found.' };
+      } catch(e) { return { error: e.message }; }
     })()
   `);
-  return { success: true, data_points: equity?.data?.length || 0, source: equity?.source, data: equity?.data || [], equity_summary: equity?.equity_summary, note: equity?.note, error: equity?.error };
+
+  if (result?.error) return { success: false, error: result.error };
+
+  const all = result?.points || [];
+  if (all.length === 0) {
+    return { success: true, point_count: 0, points: [], note: result?.note || 'No equity data.' };
+  }
+
+  if (verbose) {
+    return {
+      success: true,
+      point_count: all.length,
+      source: result.source,
+      source_path: result.source_path,
+      points: all,
+    };
+  }
+
+  // Locate peak, trough, max drawdown
+  let peakEq = -Infinity, peakIdx = 0;
+  let troughEq = Infinity, troughIdx = 0;
+  let maxDD = 0, maxDDIdx = 0;
+  for (let i = 0; i < all.length; i++) {
+    const p = all[i];
+    if (typeof p.equity === 'number' && p.equity > peakEq) { peakEq = p.equity; peakIdx = i; }
+    if (typeof p.equity === 'number' && p.equity < troughEq) { troughEq = p.equity; troughIdx = i; }
+    if (typeof p.dd === 'number' && p.dd > maxDD) { maxDD = p.dd; maxDDIdx = i; }
+  }
+
+  // Uniform downsample to ~targetPoints buckets, always including first/last
+  const step = Math.max(1, Math.floor(all.length / targetPoints));
+  const sampled = [];
+  for (let i = 0; i < all.length; i += step) {
+    const p = all[i];
+    sampled.push({
+      i,
+      time: p.time,
+      equity: typeof p.equity === 'number' ? round4(p.equity) : p.equity,
+      dd: typeof p.dd === 'number' ? round4(p.dd) : p.dd,
+    });
+  }
+  const lastSampled = sampled[sampled.length - 1];
+  const last = all[all.length - 1];
+  if (!lastSampled || lastSampled.i !== all.length - 1) {
+    sampled.push({
+      i: all.length - 1,
+      time: last.time,
+      equity: typeof last.equity === 'number' ? round4(last.equity) : last.equity,
+      dd: typeof last.dd === 'number' ? round4(last.dd) : last.dd,
+    });
+  }
+
+  return {
+    success: true,
+    point_count: all.length,
+    sample_count: sampled.length,
+    source: result.source,
+    source_path: result.source_path,
+    final_equity: typeof last.equity === 'number' ? round4(last.equity) : last.equity,
+    peak: { trade_index: peakIdx, time: all[peakIdx].time, equity: round4(peakEq) },
+    trough: { trade_index: troughIdx, time: all[troughIdx].time, equity: round4(troughEq) },
+    max_drawdown: { trade_index: maxDDIdx, time: all[maxDDIdx].time, dd: round4(maxDD) },
+    points: sampled,
+    hint: 'Pass verbose: true for one point per trade (no downsampling).',
+  };
 }
 
 export async function getQuote({ symbol } = {}) {

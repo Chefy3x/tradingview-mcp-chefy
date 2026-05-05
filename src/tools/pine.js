@@ -30,8 +30,15 @@ export function registerPineTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('pine_get_console', 'Read Pine Script console/log output (compile messages, log.info(), errors)', {}, async () => {
-    try { return jsonResult(await core.getConsole()); }
+  server.tool('pine_get_console', 'Read Pine Script console/log output (compile messages, log.info(), errors). Pass errors_only=true to drop info/log lines.', {
+    errors_only: z.coerce.boolean().optional().describe('Filter to error/warning entries only (drops log.info() / debug output).'),
+  }, async ({ errors_only }) => {
+    try { return jsonResult(await core.getConsole({ errors_only })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  server.tool('pine_console_errors', 'Read Pine Script console output filtered to errors and warnings only. Wrapper for pine_get_console with errors_only=true — useful while iterating on a script when you only care about what failed.', {}, async () => {
+    try { return jsonResult(await core.getConsole({ errors_only: true })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 

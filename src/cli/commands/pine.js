@@ -99,8 +99,11 @@ register('pine', {
       handler: () => core.getErrors(),
     }],
     ['console', {
-      description: 'Get Pine Script console/log output',
-      handler: () => core.getConsole(),
+      description: 'Get Pine Script console/log output (-e for errors/warnings only)',
+      options: {
+        errors: { type: 'boolean', short: 'e', description: 'Filter to errors and warnings only' },
+      },
+      handler: (opts) => core.getConsole({ errors_only: opts.errors }),
     }],
   ]),
 });

@@ -73,8 +73,15 @@ register('data', {
       handler: (opts) => core.getTrades({ max_trades: opts.max ? Number(opts.max) : undefined }),
     }],
     ['equity', {
-      description: 'Get strategy equity curve',
-      handler: () => core.getEquity(),
+      description: 'Get strategy equity curve (downsampled to ~50 points by default; -v for full curve)',
+      options: {
+        points: { type: 'string', short: 'p', description: 'Target sample count (default 50, max 500)' },
+        verbose: { type: 'boolean', short: 'v', description: 'Return all per-trade points (no downsampling)' },
+      },
+      handler: (opts) => core.getEquity({
+        points: opts.points ? Number(opts.points) : undefined,
+        verbose: opts.verbose,
+      }),
     }],
     ['depth', {
       description: 'Get order book / DOM data',

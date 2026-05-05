@@ -32,8 +32,11 @@ export function registerDataTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('data_get_equity', 'Get equity curve data from Strategy Tester', {}, async () => {
-    try { return jsonResult(await core.getEquity()); }
+  server.tool('data_get_equity', 'Get strategy equity curve. Default returns ~50 downsampled points + peak/trough/max-drawdown markers (~1KB). Pass verbose=true for the full curve (one point per trade).', {
+    points: z.coerce.number().optional().describe('Target sample count for default mode (clamped 2-500, default 50)'),
+    verbose: z.coerce.boolean().optional().describe('Return all per-trade equity points (no downsampling).'),
+  }, async ({ points, verbose }) => {
+    try { return jsonResult(await core.getEquity({ points, verbose })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 

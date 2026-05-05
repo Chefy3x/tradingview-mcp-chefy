@@ -376,7 +376,7 @@ export async function save() {
   return { success: true, action: dialogHandled ? 'saved_with_dialog' : 'Ctrl+S_dispatched' };
 }
 
-export async function getConsole() {
+export async function getConsole({ errors_only } = {}) {
   const editorReady = await ensurePineEditorOpen();
   if (!editorReady) throw new Error('Could not open Pine Editor.');
 
@@ -423,7 +423,23 @@ export async function getConsole() {
     })()
   `);
 
-  return { success: true, entries: entries || [], entry_count: entries?.length || 0 };
+  let filtered = entries || [];
+  if (errors_only) {
+    filtered = filtered.filter(e => {
+      if (!e || typeof e !== 'object') return false;
+      const t = (e.type || '').toLowerCase();
+      if (t === 'error' || t === 'warning') return true;
+      const msg = (e.message || '').slice(0, 200);
+      return /\b(error|fail|failed|exception|cannot|undefined|invalid|missing|expected)\b/i.test(msg);
+    });
+  }
+  return {
+    success: true,
+    entries: filtered,
+    entry_count: filtered.length,
+    total_before_filter: errors_only ? (entries?.length || 0) : undefined,
+    filtered: !!errors_only,
+  };
 }
 
 export async function smartCompile() {
