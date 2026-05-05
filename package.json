@@ -1,9 +1,17 @@
 {
-  "name": "tradingview-mcp",
-  "version": "1.0.0",
-  "description": "MCP bridge for TradingView Desktop via Chrome DevTools Protocol",
+  "name": "tradingview-mcp-chefy",
+  "version": "0.1.0",
+  "description": "Token-efficient TradingView MCP for backtesting — in-browser strategy aggregation, summary-by-default reads, built on the work of LewisWJackson and tradesdontlie",
   "type": "module",
   "main": "src/server.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Chefy3x/tradingview-mcp-chefy.git"
+  },
+  "homepage": "https://github.com/Chefy3x/tradingview-mcp-chefy",
+  "bugs": {
+    "url": "https://github.com/Chefy3x/tradingview-mcp-chefy/issues"
+  },
   "bin": {
     "tv": "src/cli/index.js"
   },
