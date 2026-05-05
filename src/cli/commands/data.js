@@ -59,8 +59,11 @@ register('data', {
       handler: (opts) => core.getPineBoxes({ study_filter: opts.filter, verbose: opts.verbose }),
     }],
     ['strategy', {
-      description: 'Get strategy performance metrics',
-      handler: () => core.getStrategyResults(),
+      description: 'Get strategy performance metrics (summary by default; -v for full reportData + trade_stats)',
+      options: {
+        verbose: { type: 'boolean', short: 'v', description: 'Return all metrics and full trade_stats' },
+      },
+      handler: (opts) => core.getStrategyResults({ verbose: opts.verbose }),
     }],
     ['trades', {
       description: 'Get strategy trade list',

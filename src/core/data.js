@@ -132,7 +132,25 @@ export async function getIndicator({ entity_id }) {
   return { success: true, entity_id, visible: data?.visible, inputs };
 }
 
-export async function getStrategyResults() {
+const SUMMARY_METRIC_KEYS = [
+  'netProfit', 'netProfitPercent',
+  'grossProfit', 'grossLoss',
+  'profitFactor',
+  'maxDrawDown', 'maxDrawdown', 'maxDrawDownPercent', 'maxDrawdownPercent',
+  'sharpeRatio', 'sortinoRatio',
+  'totalTrades', 'numberOfTrades', 'totalOpenTrades',
+  'percentProfitable', 'percentWinningTrades',
+  'numberOfWinningTrades', 'numberOfLosingTrades',
+  'avgTrade', 'avgWinningTrade', 'avgLosingTrade',
+  'largestWinningTrade', 'largestLosingTrade',
+  'avgBarsInTrade', 'avgBarsInWinningTrade', 'avgBarsInLosingTrade',
+  'buyHoldReturn', 'buyHoldReturnPercent',
+  'commissionPaid',
+  'ratioAvgWinAvgLoss',
+  'expectancy',
+];
+
+export async function getStrategyResults({ verbose } = {}) {
   const results = await evaluate(`
     (function() {
       try {
@@ -143,25 +161,184 @@ export async function getStrategyResults() {
           var s = sources[i];
           if (s.metaInfo && s.metaInfo().is_price_study === false && (s.reportData || s.performance)) { strat = s; break; }
         }
-        if (!strat) return {metrics: {}, source: 'internal_api', error: 'No strategy found on chart. Add a strategy indicator first.'};
+        if (!strat) return {error: 'No strategy found on chart. Add a strategy indicator first.'};
+
+        var stratName = '';
+        try { var meta = strat.metaInfo(); stratName = meta.description || meta.shortDescription || ''; } catch(e) {}
+
         var metrics = {};
         if (strat.reportData) {
           var rd = typeof strat.reportData === 'function' ? strat.reportData() : strat.reportData;
           if (rd && typeof rd === 'object') {
             if (typeof rd.value === 'function') rd = rd.value();
-            if (rd) { var keys = Object.keys(rd); for (var k = 0; k < keys.length; k++) { var val = rd[keys[k]]; if (val !== null && val !== undefined && typeof val !== 'function') metrics[keys[k]] = val; } }
+            if (rd) {
+              var keys = Object.keys(rd);
+              for (var k = 0; k < keys.length; k++) {
+                var val = rd[keys[k]];
+                if (val !== null && val !== undefined && typeof val !== 'function') metrics[keys[k]] = val;
+              }
+            }
           }
         }
         if (Object.keys(metrics).length === 0 && strat.performance) {
           var perf = strat.performance();
           if (perf && typeof perf.value === 'function') perf = perf.value();
-          if (perf && typeof perf === 'object') { var pkeys = Object.keys(perf); for (var p = 0; p < pkeys.length; p++) { var pval = perf[pkeys[p]]; if (pval !== null && pval !== undefined && typeof pval !== 'function') metrics[pkeys[p]] = pval; } }
+          if (perf && typeof perf === 'object') {
+            var pkeys = Object.keys(perf);
+            for (var p = 0; p < pkeys.length; p++) {
+              var pval = perf[pkeys[p]];
+              if (pval !== null && pval !== undefined && typeof pval !== 'function') metrics[pkeys[p]] = pval;
+            }
+          }
         }
-        return {metrics: metrics, source: 'internal_api'};
-      } catch(e) { return {metrics: {}, source: 'internal_api', error: e.message}; }
+
+        // Compute trade-derived aggregates server-side (inside TradingView runtime)
+        var tradeStats = null;
+        try {
+          var orders = null;
+          if (strat.ordersData) {
+            orders = typeof strat.ordersData === 'function' ? strat.ordersData() : strat.ordersData;
+            if (orders && typeof orders.value === 'function') orders = orders.value();
+          }
+          if (!Array.isArray(orders) && strat.tradesData) {
+            orders = typeof strat.tradesData === 'function' ? strat.tradesData() : strat.tradesData;
+            if (orders && typeof orders.value === 'function') orders = orders.value();
+          }
+          if (Array.isArray(orders) && orders.length > 0) {
+            var n = 0, wins = 0, losses = 0, scratches = 0;
+            var grossProfit = 0, grossLoss = 0;
+            var equity = 0, peak = 0, maxDD = 0;
+            var firstTime = null, lastTime = null;
+            for (var t = 0; t < orders.length; t++) {
+              var o = orders[t];
+              if (!o || typeof o !== 'object') continue;
+              var pnl = null;
+              if (o.profit != null) pnl = o.profit;
+              else if (o.pnl != null) pnl = o.pnl;
+              else if (o.pl != null) pnl = o.pl;
+              else if (o.netProfit != null) pnl = o.netProfit;
+              if (typeof pnl === 'object' && pnl !== null && pnl.value != null) pnl = pnl.value;
+              if (typeof pnl !== 'number' || isNaN(pnl)) continue;
+              n++;
+              if (pnl > 0) { wins++; grossProfit += pnl; }
+              else if (pnl < 0) { losses++; grossLoss += pnl; }
+              else scratches++;
+              equity += pnl;
+              if (equity > peak) peak = equity;
+              var dd = peak - equity;
+              if (dd > maxDD) maxDD = dd;
+              var ts = o.time || o.entryTime || o.exitTime || null;
+              if (typeof ts === 'number') {
+                if (firstTime == null || ts < firstTime) firstTime = ts;
+                if (lastTime == null || ts > lastTime) lastTime = ts;
+              }
+            }
+            if (n > 0) {
+              tradeStats = {
+                trade_count: n,
+                wins: wins,
+                losses: losses,
+                scratches: scratches,
+                win_rate: wins / n,
+                net_profit: grossProfit + grossLoss,
+                gross_profit: grossProfit,
+                gross_loss: grossLoss,
+                profit_factor: grossLoss !== 0 ? Math.abs(grossProfit / grossLoss) : null,
+                avg_win: wins ? grossProfit / wins : 0,
+                avg_loss: losses ? grossLoss / losses : 0,
+                expectancy: (grossProfit + grossLoss) / n,
+                max_drawdown_running: maxDD,
+                first_trade_time: firstTime,
+                last_trade_time: lastTime,
+                raw_order_count: orders.length,
+              };
+            } else {
+              tradeStats = { raw_order_count: orders.length, note: 'Could not parse pnl from any order.' };
+            }
+          }
+        } catch(e) { tradeStats = { error: e.message }; }
+
+        return {strategy_name: stratName, metrics: metrics, trade_stats: tradeStats, source: 'internal_api'};
+      } catch(e) { return {error: e.message}; }
     })()
   `);
-  return { success: true, metric_count: Object.keys(results?.metrics || {}).length, source: results?.source, metrics: results?.metrics || {}, error: results?.error };
+
+  if (results?.error) {
+    return { success: false, error: results.error };
+  }
+
+  const allMetrics = results?.metrics || {};
+  const tradeStats = results?.trade_stats;
+
+  if (verbose) {
+    return {
+      success: true,
+      strategy_name: results?.strategy_name,
+      source: results?.source,
+      metric_count: Object.keys(allMetrics).length,
+      metrics: allMetrics,
+      trade_stats: tradeStats,
+    };
+  }
+
+  const summary = {};
+  for (const key of SUMMARY_METRIC_KEYS) {
+    if (allMetrics[key] !== undefined) summary[key] = normalizeMetric(allMetrics[key]);
+  }
+
+  if (tradeStats && !tradeStats.error) {
+    if (summary.totalTrades == null && summary.numberOfTrades == null && tradeStats.trade_count != null) {
+      summary.totalTrades = tradeStats.trade_count;
+    }
+    if (summary.percentProfitable == null && tradeStats.win_rate != null) {
+      summary.percentProfitable = round4(tradeStats.win_rate * 100);
+    }
+    if (summary.profitFactor == null && tradeStats.profit_factor != null) {
+      summary.profitFactor = round4(tradeStats.profit_factor);
+    }
+    if (summary.netProfit == null && tradeStats.net_profit != null) {
+      summary.netProfit = round4(tradeStats.net_profit);
+    }
+    if (summary.avgWinningTrade == null && tradeStats.avg_win) {
+      summary.avgWinningTrade = round4(tradeStats.avg_win);
+    }
+    if (summary.avgLosingTrade == null && tradeStats.avg_loss) {
+      summary.avgLosingTrade = round4(tradeStats.avg_loss);
+    }
+    if (summary.expectancy == null && tradeStats.expectancy != null) {
+      summary.expectancy = round4(tradeStats.expectancy);
+    }
+    if (summary.maxDrawDown == null && summary.maxDrawdown == null && tradeStats.max_drawdown_running) {
+      summary.maxDrawDown = round4(tradeStats.max_drawdown_running);
+    }
+  }
+
+  return {
+    success: true,
+    strategy_name: results?.strategy_name,
+    source: results?.source,
+    summary,
+    metric_keys_omitted: Math.max(Object.keys(allMetrics).length - Object.keys(summary).length, 0),
+    hint: 'Pass verbose: true to get all metrics and full trade_stats.',
+  };
+}
+
+function normalizeMetric(v) {
+  if (v == null) return v;
+  if (typeof v === 'number') return round4(v);
+  if (typeof v === 'object') {
+    // TradingView often returns {value, all, long, short} or {p, pAll}
+    if (typeof v.value === 'number') return round4(v.value);
+    if (typeof v.all === 'number') return round4(v.all);
+    if (typeof v.pAll === 'number') return round4(v.pAll);
+    return v;
+  }
+  return v;
+}
+
+function round4(n) {
+  if (typeof n !== 'number' || !isFinite(n)) return n;
+  return Math.round(n * 10000) / 10000;
 }
 
 export async function getTrades({ max_trades } = {}) {

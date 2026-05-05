@@ -18,8 +18,10 @@ export function registerDataTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('data_get_strategy_results', 'Get strategy performance metrics from Strategy Tester', {}, async () => {
-    try { return jsonResult(await core.getStrategyResults()); }
+  server.tool('data_get_strategy_results', 'Get strategy performance metrics from Strategy Tester. Returns a curated summary (~200B) by default — pass verbose=true for the full metrics object plus trade-derived stats.', {
+    verbose: z.coerce.boolean().optional().describe('Return all reportData metrics + full trade_stats aggregate. Default false returns curated summary only.'),
+  }, async ({ verbose }) => {
+    try { return jsonResult(await core.getStrategyResults({ verbose })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
